@@ -12,6 +12,7 @@ from telegram.ext import (
 from modules.risk_assessment import get_risk_handler
 from modules.password_checker import get_password_handler
 from modules.locked import network_scanner_locked, log_analysis_locked
+from keep_alive import keep_alive
 
 load_dotenv()
 
@@ -86,6 +87,7 @@ def main():
     app.add_handler(MessageHandler(filters.Regex("^4️⃣ Log Analyzer"), log_analysis_locked))
 
     logger.info("CyberShield bot is running...")
+    keep_alive()
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
