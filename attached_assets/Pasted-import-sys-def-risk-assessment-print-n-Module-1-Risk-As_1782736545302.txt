@@ -1,0 +1,70 @@
+import sys
+
+def risk_assessment():
+    print("\n--- [Module 1] Risk Assessment ---")
+    score = 0
+    # You can easily add more questions to this list later!
+    questions = [
+        ("Is a firewall enabled?", 35),
+        ("Are systems regularly patched/updated?", 35),
+        ("Is Multi-Factor Authentication (MFA) used?", 30)
+    ]
+    
+    for q, points in questions:
+        ans = input(f"{q} (yes/no): ").strip().lower()
+        if ans == 'no':
+            score += points
+            
+    print(f"\nCalculated Risk Score: {score}/100")
+    if score >= 65:
+        print("Status: HIGH RISK. Stronger security controls needed.")
+    else:
+        print("Status: ACCEPTABLE RISK. Continue monitoring.")
+
+def password_checker():
+    print("\n--- [Module 2] Password Analyzer ---")
+    password = input("Enter a password to test: ")
+    
+    # Simple beginner checks (Length and basic composition)
+    if len(password) < 8:
+        print("❌ Weak: Password must be at least 8 characters long.")
+    elif password.islower() or password.isupper():
+        print("⚠️ Medium: Mix uppercase and lowercase letters for better security.")
+    elif password.isalnum():
+        print("⚠️ Medium: Add special characters (like !, @, #, $) to make it stronger.")
+    else:
+        print("✅ Strong: Good length and variety of characters!")
+
+def network_scanner():
+    # Placeholder for when you learn socket programming / Nmap
+    print("\n🔒 [Module 3: Network Recon] is currently locked.")
+    print("Come back here when you complete the Networking & Python modules in your certificate!")
+    print("We will write code to ping IPs and scan for open ports.")
+
+def main_menu():
+    while True:
+        print("\n=================================")
+        print("    CYBERSHIELD ASSISTANT BOT    ")
+        print("=================================")
+        print("1. Run Risk Assessment (Beginner)")
+        print("2. Test Password Strength (Beginner)")
+        print("3. Network Port Scanner (Advanced - Locked)")
+        print("4. Exit Bot")
+        
+        choice = input("\nSelect an option (1-4): ").strip()
+        
+        if choice == '1':
+            risk_assessment()
+        elif choice == '2':
+            password_checker()
+        elif choice == '3':
+            network_scanner()
+        elif choice == '4':
+            print("Shutting down CyberShield. Stay safe!")
+            sys.exit()
+        else:
+            print("Invalid choice. Please pick a number from the menu.")
+
+# This starts the bot
+if __name__ == "__main__":
+    main_menu()
