@@ -11,7 +11,7 @@ from telegram.ext import (
 )
 
 from modules.gemini_client import get_client, MODEL
-from modules.html_utils import safe_reply_html, safe_edit_html
+from modules.html_utils import safe_reply_html, send_html_report
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +67,7 @@ async def analyze_logs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         await status_msg.edit_text(f"❌ Analysis failed: {exc}")
         return WAITING_LOG_DATA
 
-    await safe_edit_html(status_msg, result_text)
+    await send_html_report(status_msg, result_text, context.bot, update.effective_chat.id)
 
     await update.message.reply_text("Paste more log data to analyze, or /cancel to go back.")
     return WAITING_LOG_DATA
