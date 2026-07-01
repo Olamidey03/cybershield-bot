@@ -107,6 +107,10 @@ async def send_html_report(status_msg, text: str, bot, chat_id: int):
     if not chunks:
         return
 
+    total = len(chunks)
+    if total > 1:
+        chunks = [f"<i>(Continued {i}/{total})</i>\n{chunk}" for i, chunk in enumerate(chunks, start=1)]
+
     await safe_edit_html(status_msg, chunks[0])
 
     for chunk in chunks[1:]:
