@@ -4,10 +4,9 @@ import asyncio
 import tempfile
 import logging
 
-from google import genai
 from google.genai import types
 
-from telegram import Update
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     ContextTypes,
     ConversationHandler,
@@ -16,24 +15,21 @@ from telegram.ext import (
     filters,
 )
 
+from modules.gemini_client import get_client, MODEL
+
 logger = logging.getLogger(__name__)
 
-MODEL = "gemini-2.5-flash"
 QUIZ_ANSWER, INTERVIEW_ANSWER = range(2)
 
-_client = None
-
-
-def get_client() -> genai.Client:
-    global _client
-    if _client is None:
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key:
-            raise RuntimeError(
-                "GEMINI_API_KEY is not set. Add it as a Replit secret to enable PDF features."
-            )
-        _client = genai.Client(api_key=api_key)
-    return _client
+PDF_TOOLS_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        [KeyboardButton("📚 Generate Quiz")],
+        [KeyboardButton("💼 Mock Interview")],
+        [KeyboardButton("🚨 Run Incident Scenario")],
+    ],
+    resize_keyboard=True,
+    one_time_keyboard=False,
+)
 
 
 def _state_name(state) -> str:
@@ -120,10 +116,11 @@ async def handle_pdf_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await status_msg.edit_text(
             f"✅ \"{display_name}\" uploaded and ready!\n\n"
-            "Try:\n"
-            "/quiz — cybersecurity quiz question\n"
-            "/interview — mock interview question\n"
-            "/scenario — incident response lab scenario"
+            "Use the buttons below, or the /quiz, /interview, /scenario commands."
+        )
+        await update.message.reply_text(
+            "Choose what you'd like to do with this document:",
+            reply_markup=PDF_TOOLS_KEYBOARD,
         )
     except Exception as exc:
         logger.exception("PDF upload failed")
@@ -203,7 +200,10 @@ async def quiz_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
 def get_quiz_handler() -> ConversationHandler:
     return ConversationHandler(
-        entry_points=[CommandHandler("quiz", quiz_command)],
+        entry_points=[
+            CommandHandler("quiz", quiz_command),
+            MessageHandler(filters.Regex("^📚 Generate Quiz$"), quiz_command),
+        ],
         states={QUIZ_ANSWER: [MessageHandler(filters.TEXT & ~filters.COMMAND, quiz_evaluate)]},
         fallbacks=[CommandHandler("cancel", quiz_cancel)],
     )
@@ -295,7 +295,10 @@ async def interview_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 def get_interview_handler() -> ConversationHandler:
     return ConversationHandler(
-        entry_points=[CommandHandler("interview", interview_command)],
+        entry_points=[
+            CommandHandler("interview", interview_command),
+            MessageHandler(filters.Regex("^💼 Mock Interview$"), interview_command),
+        ],
         states={INTERVIEW_ANSWER: [MessageHandler(filters.TEXT & ~filters.COMMAND, interview_evaluate)]},
         fallbacks=[CommandHandler("cancel", interview_cancel)],
     )

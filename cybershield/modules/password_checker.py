@@ -137,7 +137,7 @@ async def cancel_password(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 def get_password_handler() -> ConversationHandler:
     return ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^2️⃣ Password Analyzer$"), start_password)],
+        entry_points=[MessageHandler(filters.Regex("^2 Password Analyzer$"), start_password)],
         states={
             WAITING_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, check_password)],
         },

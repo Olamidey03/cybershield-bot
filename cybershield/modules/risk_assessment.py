@@ -116,7 +116,7 @@ async def cancel_risk(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
 def get_risk_handler() -> ConversationHandler:
     return ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^1️⃣ Risk Assessment$"), start_risk)],
+        entry_points=[MessageHandler(filters.Regex("^1 Risk Assessment$"), start_risk)],
         states={
             QUESTION_INDEX: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_answer)],
         },
