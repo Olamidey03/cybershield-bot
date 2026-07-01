@@ -12,6 +12,12 @@ from telegram.ext import (
 from modules.risk_assessment import get_risk_handler
 from modules.password_checker import get_password_handler
 from modules.locked import network_scanner_locked, log_analysis_locked
+from modules.pdf_assistant import (
+    handle_pdf_upload,
+    get_quiz_handler,
+    get_interview_handler,
+    scenario_command,
+)
 from keep_alive import keep_alive
 
 load_dotenv()
@@ -40,6 +46,11 @@ WELCOME_MESSAGE = (
     "2️⃣ *Password Analyzer* — Test password strength\n"
     "3️⃣ *Network Scanner* 🔒 — Port scanning _(coming soon)_\n"
     "4️⃣ *Log Analyzer* 🔒 — Log threat detection _(coming soon)_\n\n"
+    "📄 *Document Assistant:*\n"
+    "Send me a PDF, then use:\n"
+    "/quiz — cybersecurity quiz question\n"
+    "/interview — mock interview question\n"
+    "/scenario — incident response lab scenario\n\n"
     "Select an option from the menu below to get started."
 )
 
@@ -51,8 +62,10 @@ ABOUT_MESSAGE = (
     "• *Risk Assessment* — Based on industry-standard security controls\n"
     "• *Password Analyzer* — Evaluates complexity, length, and patterns\n"
     "• *Network Scanner* — Socket-based port scanning _(locked)_\n"
-    "• *Log Analyzer* — SIEM-style log pattern matching _(locked)_\n\n"
-    "*Stack:* Python + python-telegram-bot\n\n"
+    "• *Log Analyzer* — SIEM-style log pattern matching _(locked)_\n"
+    "• *Document Assistant* — Upload a PDF, then quiz yourself, practice "
+    "mock interviews, or run incident response scenarios based on it\n\n"
+    "*Stack:* Python + python-telegram-bot + Gemini (google-genai)\n\n"
     "Stay safe out there. 🔐"
 )
 
@@ -79,6 +92,12 @@ def main():
     # Conversation handlers (must be registered before catch-all handlers)
     app.add_handler(get_risk_handler())
     app.add_handler(get_password_handler())
+    app.add_handler(get_quiz_handler())
+    app.add_handler(get_interview_handler())
+
+    # PDF document assistant
+    app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf_upload))
+    app.add_handler(CommandHandler("scenario", scenario_command))
 
     # Simple command + menu button handlers
     app.add_handler(CommandHandler("start", start))
