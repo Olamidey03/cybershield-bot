@@ -1,6 +1,10 @@
 import re
+import logging
+
 from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler, CommandHandler, MessageHandler, filters
+
+logger = logging.getLogger(__name__)
 
 WAITING_PASSWORD = 0
 
@@ -95,39 +99,46 @@ async def start_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     return WAITING_PASSWORD
 
 async def check_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    password = update.message.text
+    try:
+        password = update.message.text
 
-    result = analyze_password(password)
-    score = result["score"]
-    strength = result["strength"]
-    length = result["length"]
-    feedback = result["feedback"]
+        result = analyze_password(password)
+        score = result["score"]
+        strength = result["strength"]
+        length = result["length"]
+        feedback = result["feedback"]
 
-    bar_filled = int(score / 10)
-    bar = "█" * bar_filled + "░" * (10 - bar_filled)
+        bar_filled = int(score / 10)
+        bar = "█" * bar_filled + "░" * (10 - bar_filled)
 
-    composition = (
-        f"{'✅' if result['has_upper'] else '❌'} Uppercase  "
-        f"{'✅' if result['has_lower'] else '❌'} Lowercase\n"
-        f"{'✅' if result['has_digit'] else '❌'} Numbers   "
-        f"{'✅' if result['has_special'] else '❌'} Special chars"
-    )
+        composition = (
+            f"{'✅' if result['has_upper'] else '❌'} Uppercase  "
+            f"{'✅' if result['has_lower'] else '❌'} Lowercase\n"
+            f"{'✅' if result['has_digit'] else '❌'} Numbers   "
+            f"{'✅' if result['has_special'] else '❌'} Special chars"
+        )
 
-    feedback_text = "\n".join(feedback) if feedback else "✅ No major issues found!"
+        feedback_text = "\n".join(feedback) if feedback else "✅ No major issues found!"
 
-    report = (
-        f"🔍 *Password Analysis Report*\n\n"
-        f"*Strength:* {strength}\n"
-        f"*Score:* {score}/100\n"
-        f"`[{bar}]`\n\n"
-        f"*Length:* {length} characters\n\n"
-        f"*Composition:*\n{composition}\n\n"
-        f"*Feedback:*\n{feedback_text}\n\n"
-        f"Send another password to test, or use /cancel to go back."
-    )
+        report = (
+            f"🔍 *Password Analysis Report*\n\n"
+            f"*Strength:* {strength}\n"
+            f"*Score:* {score}/100\n"
+            f"`[{bar}]`\n\n"
+            f"*Length:* {length} characters\n\n"
+            f"*Composition:*\n{composition}\n\n"
+            f"*Feedback:*\n{feedback_text}\n\n"
+            f"Send another password to test, or use /cancel to go back."
+        )
 
-    await update.message.reply_text(report, parse_mode="Markdown")
-    return WAITING_PASSWORD
+        await update.message.reply_text(report, parse_mode="Markdown")
+        return WAITING_PASSWORD
+    except Exception:
+        logger.exception("Password checker handler failed")
+        await update.message.reply_text(
+            "❌ Something went wrong analyzing that password. Use /start to try again."
+        )
+        return ConversationHandler.END
 
 async def cancel_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(

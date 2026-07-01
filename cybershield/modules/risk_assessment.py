@@ -1,5 +1,9 @@
+import logging
+
 from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler, CommandHandler, MessageHandler, filters
+
+logger = logging.getLogger(__name__)
 
 QUESTION_INDEX = 0
 SCORE = 1
@@ -45,24 +49,33 @@ async def _ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    answer = update.message.text.strip().lower()
-    if answer not in ("yes", "no"):
-        await update.message.reply_text("Please reply with *yes* or *no*.", parse_mode="Markdown")
+    try:
+        answer = update.message.text.strip().lower()
+        if answer not in ("yes", "no"):
+            await update.message.reply_text("Please reply with *yes* or *no*.", parse_mode="Markdown")
+            return QUESTION_INDEX
+
+        idx = context.user_data["risk_index"]
+        _, points = QUESTIONS[idx]
+
+        if answer == "no":
+            context.user_data["risk_score"] += points
+
+        context.user_data["risk_index"] += 1
+
+        if context.user_data["risk_index"] >= len(QUESTIONS):
+            return await _show_result(update, context)
+
+        await _ask_question(update, context)
         return QUESTION_INDEX
-
-    idx = context.user_data["risk_index"]
-    _, points = QUESTIONS[idx]
-
-    if answer == "no":
-        context.user_data["risk_score"] += points
-
-    context.user_data["risk_index"] += 1
-
-    if context.user_data["risk_index"] >= len(QUESTIONS):
-        return await _show_result(update, context)
-
-    await _ask_question(update, context)
-    return QUESTION_INDEX
+    except Exception:
+        logger.exception("Risk assessment handler failed")
+        context.user_data.pop("risk_score", None)
+        context.user_data.pop("risk_index", None)
+        await update.message.reply_text(
+            "❌ Something went wrong with the assessment. It's been reset — use /start to try again."
+        )
+        return ConversationHandler.END
 
 async def _show_result(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     score = context.user_data["risk_score"]
