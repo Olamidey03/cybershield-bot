@@ -1,0 +1,19 @@
+# Privacy Policy for CyberShield Bot
+
+**Last Updated: July 2026**
+
+CyberShield Bot ("we", "our") is an AI-powered cybersecurity assistant built for education, automated vulnerability analysis, and security log analysis. We are committed to protecting the data processing privacy of our users.
+
+### 1. Data We Access and Process
+* **Public Account Information:** Through the Telegram API, we see your screen name, username, and unique Telegram User ID to manage your session state.
+* **User Input & Log Submissions:** Any technical data you input (such as IP addresses, Nmap scan logs, system logs, or security PDFs) is passed securely to the Google Gemini API solely to generate your security analysis reports. 
+
+### 2. Data Retention and Storage
+* **No Persistent Database:** CyberShield does not actively save, harvest, log, or sell your personal data, past scan histories, or analyzed credentials to any database. 
+* **Volatile Session Processing:** All data processing occurs on runtime memory (RAM) via our hosting cluster on Render and is cleared immediately upon resetting your session state or completing a command.
+
+### 3. Third-Party Services
+Our backend leverages the official Google Gemini API for generative threat-hunting analysis. Data transmission is bound securely to their platform API terms. No analytics trackers or commercial advertisement pixels are integrated into this bot.
+
+### 4. Contact & Compliance
+If you have questions regarding this policy or wish to request data clearing, you may terminate your active session directly within Telegram by sending the `/cancel` command or blocking the bot.
