@@ -19,6 +19,7 @@ from modules.pdf_assistant import (
     get_interview_handler,
     scenario_command,
 )
+from modules.input_parser import handle_raw_text, handle_document
 from keep_alive import keep_alive
 
 load_dotenv()
@@ -108,6 +109,13 @@ def main():
     # Simple command + menu button handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Regex("^About$"), about))
+
+    # Input Parsing Engine — generic fallbacks for pasted data / uploaded documents
+    # that aren't already claimed by an active conversation or the PDF quiz/interview
+    # flow above. Must stay registered last so they never intercept menu or
+    # conversation input.
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_raw_text))
 
     logger.info("CyberShield bot is running...")
     keep_alive()
