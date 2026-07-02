@@ -57,6 +57,14 @@ def route_and_parse(filename: str, data: bytes) -> str:
 # Handlers
 # ---------------------------------------------------------------------------
 
+def _store_parsed_text(context: ContextTypes.DEFAULT_TYPE, text: str, source: str):
+    """Securely hold extracted text in this user's in-memory session state
+    (context.user_data) — never written to disk. Serves as the placeholder
+    hand-off point for the next pipeline step (AI analysis)."""
+    context.user_data["parsed_text"] = text
+    context.user_data["parsed_source"] = source
+
+
 async def handle_raw_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Capture pasted security data sent as plain text (not a command)."""
     try:
@@ -70,8 +78,11 @@ async def handle_raw_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        _store_parsed_text(context, text, source="pasted text")
+
         await update.message.reply_text(
-            f"✅ Received pasted data — {len(text)} characters captured successfully."
+            f"✅ Received pasted data — {len(text)} characters captured and stored in memory.\n\n"
+            "🔧 Next step (analysis) coming soon."
         )
     except Exception as exc:
         logger.exception("Raw text handling failed")
@@ -79,7 +90,11 @@ async def handle_raw_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Securely download a document fully in memory and parse it by extension."""
+    """Securely download a document fully in memory and parse it by extension.
+
+    This is now the single, exclusive entry point for ALL supported document
+    types (.pdf, .docx, .txt, .csv) — nothing is ever written to local disk.
+    """
     document = update.message.document
     if not document:
         return
@@ -96,8 +111,12 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         extracted_text = route_and_parse(filename, file_bytes)
 
+        _store_parsed_text(context, extracted_text, source=filename)
+
         await update.message.reply_text(
-            f"✅ Successfully parsed \"{filename}\" — extracted {len(extracted_text)} characters."
+            f"✅ Successfully parsed \"{filename}\" — extracted {len(extracted_text)} characters "
+            "and stored in memory.\n\n"
+            "🔧 Next step (analysis) coming soon."
         )
     except ValueError as exc:
         await update.message.reply_text(f"⚠️ {exc}")

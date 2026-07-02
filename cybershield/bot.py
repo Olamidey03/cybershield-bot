@@ -14,7 +14,6 @@ from modules.password_checker import get_password_handler
 from modules.net_scanner import get_network_scanner_handler
 from modules.log_analyzer import get_log_analyzer_handler
 from modules.pdf_assistant import (
-    handle_pdf_upload,
     get_quiz_handler,
     get_interview_handler,
     scenario_command,
@@ -101,8 +100,8 @@ def main():
     app.add_handler(get_quiz_handler())
     app.add_handler(get_interview_handler())
 
-    # PDF document assistant
-    app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf_upload))
+    # PDF-based quiz/interview/scenario commands (text-entry points only —
+    # document uploads are now handled exclusively by the Input Parsing Engine below)
     app.add_handler(CommandHandler("scenario", scenario_command))
     app.add_handler(MessageHandler(filters.Regex("^🚨 Run Incident Scenario$"), scenario_command))
 
@@ -110,10 +109,10 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Regex("^About$"), about))
 
-    # Input Parsing Engine — generic fallbacks for pasted data / uploaded documents
-    # that aren't already claimed by an active conversation or the PDF quiz/interview
-    # flow above. Must stay registered last so they never intercept menu or
-    # conversation input.
+    # Input Parsing Engine — the single, exclusive entry point for ALL document
+    # uploads (.pdf, .docx, .txt, .csv) and pasted text that isn't already claimed
+    # by an active conversation. Must stay registered last so it never intercepts
+    # menu or conversation input.
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_raw_text))
 
