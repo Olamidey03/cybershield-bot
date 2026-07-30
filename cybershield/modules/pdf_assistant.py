@@ -1,10 +1,6 @@
-import os
-import json
 import asyncio
-import tempfile
+import json
 import logging
-
-from google.genai import types
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
@@ -16,7 +12,7 @@ from telegram.ext import (
 )
 
 from modules.gemini_client import get_client, MODEL
-from modules.html_utils import safe_reply_html, send_html_report
+from modules.html_utils import send_html_report
 
 logger = logging.getLogger(__name__)
 
@@ -32,9 +28,7 @@ PDF_TOOLS_KEYBOARD = ReplyKeyboardMarkup(
     one_time_keyboard=False,
 )
 
-# Shared instruction appended to every prompt whose output is shown directly to the
-# user, so all AI-generated text stays valid HTML for send_html_report's chunking
-# engine (never Markdown).
+# Appended to every prompt so Gemini returns Telegram-safe HTML, not Markdown.
 HTML_FORMAT_RULES = (
     "Format your response using clean HTML tags compatible with Telegram's HTML parse "
     "mode. Use ONLY these tags: <b> for section headers and emphasis, <i> for italics, and "
@@ -45,106 +39,33 @@ HTML_FORMAT_RULES = (
 )
 
 
-def _state_name(state) -> str:
-    return getattr(state, "name", str(state))
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+def _get_parsed_text(context: ContextTypes.DEFAULT_TYPE) -> str | None:
+    """Return the text previously extracted by the Input Parsing Engine, or None."""
+    return context.user_data.get("parsed_text")
 
 
-def _get_active_file_part(context: ContextTypes.DEFAULT_TYPE):
-    active = context.user_data.get("active_pdf")
-    if not active:
-        return None
-    return types.Part.from_uri(file_uri=active["uri"], mime_type=active["mime_type"])
-
-
-async def _require_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    if not context.user_data.get("active_pdf"):
+async def _require_parsed_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Reply with a friendly prompt if no document/text has been parsed yet."""
+    if not _get_parsed_text(context):
         await update.message.reply_text(
-            "📎 Please upload a PDF document first, then try this command again."
+            "📎 Please upload a document (.pdf, .docx, .txt, or .csv) or paste your text "
+            "first, then try this command again."
         )
         return False
     return True
 
 
 # ---------------------------------------------------------------------------
-# PDF upload handler
-# ---------------------------------------------------------------------------
-
-async def handle_pdf_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    document = update.message.document
-    if not document:
-        return
-
-    is_pdf = (document.mime_type == "application/pdf") or (
-        document.file_name and document.file_name.lower().endswith(".pdf")
-    )
-    if not is_pdf:
-        await update.message.reply_text("📎 I can only process PDF documents right now.")
-        return
-
-    status_msg = await update.message.reply_text("📄 Uploading document, please wait...")
-
-    tmp_path = None
-    try:
-        tg_file = await context.bot.get_file(document.file_id)
-        fd, tmp_path = tempfile.mkstemp(suffix=".pdf")
-        os.close(fd)
-        await tg_file.download_to_drive(tmp_path)
-
-        client = get_client()
-        display_name = document.file_name or "document.pdf"
-
-        uploaded = await asyncio.to_thread(
-            client.files.upload,
-            file=tmp_path,
-            config={"display_name": display_name, "mime_type": "application/pdf"},
-        )
-
-        # Gemini processes uploaded files asynchronously — poll until ACTIVE.
-        for _ in range(15):
-            if _state_name(uploaded.state) == "ACTIVE":
-                break
-            if _state_name(uploaded.state) == "FAILED":
-                raise RuntimeError("Gemini failed to process the document.")
-            await asyncio.sleep(2)
-            uploaded = await asyncio.to_thread(client.files.get, name=uploaded.name)
-
-        context.user_data["active_pdf"] = {
-            "uri": uploaded.uri,
-            "name": uploaded.name,
-            "mime_type": uploaded.mime_type or "application/pdf",
-            "display_name": display_name,
-        }
-        # A new document invalidates any pending quiz/interview state.
-        context.user_data.pop("quiz_pending", None)
-        context.user_data.pop("interview_pending", None)
-
-        await status_msg.edit_text(
-            f"✅ \"{display_name}\" uploaded and ready!\n\n"
-            "Use the buttons below, or the /quiz, /interview, /scenario commands."
-        )
-        await update.message.reply_text(
-            "Choose what you'd like to do with this document:",
-            reply_markup=PDF_TOOLS_KEYBOARD,
-        )
-    except Exception as exc:
-        logger.exception("PDF upload failed")
-        context.user_data.pop("active_pdf", None)
-        try:
-            await status_msg.edit_text(f"❌ Failed to process document: {exc}")
-        except Exception:
-            logger.exception("Failed to notify user of PDF upload failure")
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            os.remove(tmp_path)
-
-
-# ---------------------------------------------------------------------------
 # /quiz
 # ---------------------------------------------------------------------------
 
-QUIZ_PROMPT = (
-    "You are a cybersecurity instructor. Based EXCLUSIVELY on the attached document, "
-    "write one challenging multiple-choice technical cybersecurity question that tests "
+QUIZ_PROMPT_TEMPLATE = (
+    "You are a cybersecurity instructor. Based EXCLUSIVELY on the document content provided "
+    "below, write one challenging multiple-choice technical cybersecurity question that tests "
     "understanding of its content.\n\n"
     "Respond ONLY with JSON in this exact shape:\n"
     '{"question": "...", "options": {"A": "...", "B": "...", "C": "...", "D": "..."}, '
@@ -152,22 +73,25 @@ QUIZ_PROMPT = (
     "The \"question\" and \"options\" values MUST be plain text only (no HTML tags, no "
     "Markdown). The \"explanation\" value may use simple HTML tags for readability — ONLY "
     "<b>, <i>, and <pre><code>...</code></pre> — never Markdown syntax (no **, no *, no "
-    "backtick fences). Escape any literal '<' or '>' inside plain text as '&lt;' and '&gt;'."
+    "backtick fences). Escape any literal '<' or '>' inside plain text as '&lt;' and '&gt;'.\n\n"
+    "Document content:\n\n{text}"
 )
 
+
 async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if not await _require_pdf(update, context):
+    if not await _require_parsed_text(update, context):
         return ConversationHandler.END
 
+    parsed_text = _get_parsed_text(context)
     status_msg = await update.message.reply_text("🧠 Generating a quiz question from your document...")
-    file_part = _get_active_file_part(context)
 
     try:
         client = get_client()
+        prompt = QUIZ_PROMPT_TEMPLATE.format(text=parsed_text)
         response = await asyncio.to_thread(
             client.models.generate_content,
             model=MODEL,
-            contents=[file_part, QUIZ_PROMPT],
+            contents=[prompt],
             config={"response_mime_type": "application/json"},
         )
         data = json.loads(response.text)
@@ -236,28 +160,32 @@ def get_quiz_handler() -> ConversationHandler:
 # /interview
 # ---------------------------------------------------------------------------
 
-INTERVIEW_PROMPT = (
+INTERVIEW_PROMPT_TEMPLATE = (
     "You are a senior Security Engineer hiring manager conducting a technical mock interview. "
-    "Based EXCLUSIVELY on the attached document, ask ONE realistic technical interview question "
-    "that a Security Engineer candidate should be able to answer, grounded in the document's content.\n\n"
+    "Based EXCLUSIVELY on the document content provided below, ask ONE realistic technical "
+    "interview question that a Security Engineer candidate should be able to answer, grounded "
+    "in the document's content.\n\n"
     "Respond ONLY with JSON in this exact shape:\n"
     '{"question": "...", "key_points": ["...", "..."]}\n\n'
-    "All values MUST be plain text only (no HTML tags, no Markdown)."
+    "All values MUST be plain text only (no HTML tags, no Markdown).\n\n"
+    "Document content:\n\n{text}"
 )
 
+
 async def interview_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if not await _require_pdf(update, context):
+    if not await _require_parsed_text(update, context):
         return ConversationHandler.END
 
+    parsed_text = _get_parsed_text(context)
     status_msg = await update.message.reply_text("🎤 Preparing a mock interview question from your document...")
-    file_part = _get_active_file_part(context)
 
     try:
         client = get_client()
+        prompt = INTERVIEW_PROMPT_TEMPLATE.format(text=parsed_text)
         response = await asyncio.to_thread(
             client.models.generate_content,
             model=MODEL,
-            contents=[file_part, INTERVIEW_PROMPT],
+            contents=[prompt],
             config={"response_mime_type": "application/json"},
         )
         data = json.loads(response.text)
@@ -285,16 +213,17 @@ async def interview_evaluate(update: Update, context: ContextTypes.DEFAULT_TYPE)
     status_msg = await update.message.reply_text("🧠 Evaluating your answer...")
 
     user_answer = update.message.text
-    file_part = _get_active_file_part(context)
+    parsed_text = _get_parsed_text(context)
 
     eval_prompt = (
         "You are a senior Security Engineer hiring manager. The candidate was asked:\n"
         f"\"{pending['question']}\"\n\n"
         f"Key points a strong answer should cover: {pending['key_points']}\n\n"
         f"Candidate's answer: \"{user_answer}\"\n\n"
-        "Using the attached document as ground truth, give constructive feedback: what they got "
-        "right, what they missed, and a brief improvement tip. End with a score out of 10. "
-        f"Keep it concise (under 150 words).\n\n{HTML_FORMAT_RULES}"
+        "Using the document content below as ground truth, give constructive feedback: what they "
+        "got right, what they missed, and a brief improvement tip. End with a score out of 10. "
+        f"Keep it concise (under 150 words).\n\n{HTML_FORMAT_RULES}\n\n"
+        f"Document content:\n\n{parsed_text}"
     )
 
     try:
@@ -302,7 +231,7 @@ async def interview_evaluate(update: Update, context: ContextTypes.DEFAULT_TYPE)
         response = await asyncio.to_thread(
             client.models.generate_content,
             model=MODEL,
-            contents=[file_part, eval_prompt],
+            contents=[eval_prompt],
         )
         feedback_text = f"📝 <b>Feedback</b>\n\n{response.text}\n\nUse /interview for another question."
         await send_html_report(status_msg, feedback_text, context.bot, update.effective_chat.id)
@@ -336,32 +265,36 @@ def get_interview_handler() -> ConversationHandler:
 # /scenario
 # ---------------------------------------------------------------------------
 
-SCENARIO_PROMPT = (
-    "You are a cybersecurity training designer. Based EXCLUSIVELY on the attached document, "
-    "create an interactive, hands-on incident response scenario or lab exercise. Include: "
-    "a realistic scenario setup, the systems/assets involved, a numbered sequence of "
+SCENARIO_PROMPT_TEMPLATE = (
+    "You are a cybersecurity training designer. Based EXCLUSIVELY on the document content "
+    "provided below, create an interactive, hands-on incident response scenario or lab exercise. "
+    "Include: a realistic scenario setup, the systems/assets involved, a numbered sequence of "
     "investigation steps the trainee should take, and 2-3 decision points where the trainee "
     "must choose an action. Ground every detail in the document's content. Structure the "
-    "response with clear <b>section headers</b>.\n\n"
-    f"{HTML_FORMAT_RULES}"
+    f"response with clear <b>section headers</b>.\n\n{HTML_FORMAT_RULES}\n\n"
+    "Document content:\n\n{text}"
 )
 
+
 async def scenario_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await _require_pdf(update, context):
+    if not await _require_parsed_text(update, context):
         return
 
+    parsed_text = _get_parsed_text(context)
     status_msg = await update.message.reply_text("🧪 Building an incident response scenario from your document...")
-    file_part = _get_active_file_part(context)
 
     try:
         client = get_client()
+        prompt = SCENARIO_PROMPT_TEMPLATE.format(text=parsed_text)
         response = await asyncio.to_thread(
             client.models.generate_content,
             model=MODEL,
-            contents=[file_part, SCENARIO_PROMPT],
+            contents=[prompt],
         )
         scenario_text = f"🧪 <b>Incident Response Scenario</b>\n\n{response.text}"
         await send_html_report(status_msg, scenario_text, context.bot, update.effective_chat.id)
     except Exception as exc:
         logger.exception("Scenario generation failed")
+        context.user_data.pop("quiz_pending", None)
+        context.user_data.pop("interview_pending", None)
         await status_msg.edit_text(f"❌ Couldn't generate a scenario: {exc}")

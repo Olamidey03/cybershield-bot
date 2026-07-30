@@ -10,6 +10,7 @@ from telegram.ext import ContextTypes
 logger = logging.getLogger(__name__)
 
 MAX_TEXT_LENGTH = 4000
+MAX_FILE_SIZE = 15 * 1024 * 1024  # 15 MB
 
 SUPPORTED_EXTENSIONS = (".pdf", ".docx", ".txt", ".csv")
 
@@ -101,6 +102,26 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     filename = document.file_name or ""
 
+    # --- Input validation guard (before any download) ---
+    # 1. Reject files over 15 MB immediately.
+    if document.file_size and document.file_size > MAX_FILE_SIZE:
+        size_mb = document.file_size / (1024 * 1024)
+        await update.message.reply_text(
+            f"⚠️ That file is too large ({size_mb:.1f} MB). "
+            "Please upload files under 15 MB."
+        )
+        return
+
+    # 2. Reject unsupported or corrupted extensions immediately.
+    lower_name = filename.lower()
+    if not any(lower_name.endswith(ext) for ext in SUPPORTED_EXTENSIONS):
+        ext_list = ", ".join(SUPPORTED_EXTENSIONS)
+        await update.message.reply_text(
+            f"⚠️ Unsupported file type: \"{filename}\". "
+            f"Supported formats are: {ext_list}"
+        )
+        return
+
     try:
         tg_file = await context.bot.get_file(document.file_id)
 
@@ -114,9 +135,13 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _store_parsed_text(context, extracted_text, source=filename)
 
         await update.message.reply_text(
-            f"✅ Successfully parsed \"{filename}\" — extracted {len(extracted_text)} characters "
-            "and stored in memory.\n\n"
-            "🔧 Next step (analysis) coming soon."
+            f"✅ <b>Document ready!</b> Extracted {len(extracted_text):,} characters from "
+            f"\"{filename}\" and stored in memory.\n\n"
+            "You can now use:\n"
+            "📚 /quiz — generate a quiz question\n"
+            "💼 /interview — mock interview question\n"
+            "🚨 /scenario — incident response scenario",
+            parse_mode="HTML",
         )
     except ValueError as exc:
         await update.message.reply_text(f"⚠️ {exc}")
