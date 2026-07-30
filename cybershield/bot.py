@@ -28,6 +28,15 @@ from modules.input_parser import handle_raw_text, handle_document
 from modules.menu import MAIN_MENU_KB, get_quiz_menu_callback_handler
 from keep_alive import keep_alive
 
+
+async def handle_hint_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show the stored quiz hint as a Telegram alert popup (show_alert=True)."""
+    query = update.callback_query
+    hint = context.user_data.get(
+        "quiz_hint", "No hint available — try generating a new quiz question."
+    )
+    await query.answer(text=hint[:200], show_alert=True)
+
 load_dotenv()
 
 logging.basicConfig(
@@ -113,6 +122,7 @@ def main():
 
     # --- Inline callback handlers (non-conversation) ---
     app.add_handler(get_quiz_menu_callback_handler())  # menu:quiz → show difficulty sub-menu
+    app.add_handler(CallbackQueryHandler(handle_hint_callback, pattern=r"^quiz:hint$"))
 
     # --- Simple command & menu button handlers ---
     app.add_handler(CommandHandler("scenario", scenario_command))

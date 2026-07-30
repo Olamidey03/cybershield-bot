@@ -1,8 +1,13 @@
-import asyncio
 import json
 import logging
 
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+)
 from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes,
@@ -12,12 +17,13 @@ from telegram.ext import (
     filters,
 )
 
-from modules.gemini_client import get_client, MODEL
+from modules.gemini_client import generate_with_retry
 from modules.html_utils import send_html_report, typing_action, NAV_FOOTER
 
 logger = logging.getLogger(__name__)
 
-QUIZ_ANSWER, INTERVIEW_ANSWER = range(2)
+# Only INTERVIEW_ANSWER is still needed — quiz no longer waits for a text reply.
+INTERVIEW_ANSWER = 0
 
 PDF_TOOLS_KEYBOARD = ReplyKeyboardMarkup(
     [
@@ -29,7 +35,6 @@ PDF_TOOLS_KEYBOARD = ReplyKeyboardMarkup(
     one_time_keyboard=False,
 )
 
-# Appended to every prompt so Gemini returns Telegram-safe HTML, not Markdown.
 HTML_FORMAT_RULES = (
     "Format your response using clean HTML tags compatible with Telegram's HTML parse "
     "mode. Use ONLY these tags: <b> for section headers and emphasis, <i> for italics, and "
@@ -60,6 +65,11 @@ _DIFFICULTY_INSTRUCTIONS = {
     ),
 }
 
+# Hint inline keyboard — tapping shows the hint as a screen alert popup.
+_HINT_KB = InlineKeyboardMarkup(
+    [[InlineKeyboardButton("💡 Need a Hint?", callback_data="quiz:hint")]]
+)
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -86,65 +96,123 @@ async def _require_parsed_text(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 # ---------------------------------------------------------------------------
-# /quiz  (also triggered by difficulty inline buttons)
+# /quiz — native Telegram poll with hint popup (Step 5)
 # ---------------------------------------------------------------------------
 
+# Character budget enforced in the prompt so output fits Telegram's poll limits:
+#   question  < 250 chars  (Telegram hard limit: 300)
+#   each option < 90 chars  (Telegram hard limit: 100)
+#   explanation < 180 chars  (Telegram hard limit: 200)
+#   hint < 150 chars  (fits comfortably in a show_alert popup)
 QUIZ_PROMPT_TEMPLATE = (
     "You are a cybersecurity instructor. Based EXCLUSIVELY on the document content provided "
-    "below, write one challenging multiple-choice technical cybersecurity question that tests "
-    "understanding of its content.\n\n"
+    "below, generate ONE multiple-choice cybersecurity quiz question.\n\n"
     "{difficulty_instruction}\n\n"
-    "Respond ONLY with JSON in this exact shape:\n"
-    '{"question": "...", "options": {"A": "...", "B": "...", "C": "...", "D": "..."}, '
-    '"correct_option": "A", "explanation": "..."}\n\n'
-    "The \"question\" and \"options\" values MUST be plain text only (no HTML tags, no "
-    "Markdown). The \"explanation\" value may use simple HTML tags for readability — ONLY "
-    "<b>, <i>, and <pre><code>...</code></pre> — never Markdown syntax (no **, no *, no "
-    "backtick fences). Escape any literal '<' or '>' inside plain text as '&lt;' and '&gt;'.\n\n"
+    "STRICT CHARACTER LIMITS — you MUST respect these or your output will be rejected:\n"
+    "  • question   < 250 characters (plain text, no HTML/Markdown)\n"
+    "  • each option < 90 characters (plain text, no HTML/Markdown)\n"
+    "  • explanation < 180 characters (plain text only — this appears as a Telegram popup)\n"
+    "  • hint       < 150 characters (plain text — shown on demand, must NOT reveal the answer)\n\n"
+    "Respond ONLY with valid JSON in this exact shape — no extra keys, no markdown fences:\n"
+    '{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},'
+    '"correct_option":"A","explanation":"...","hint":"..."}}\n\n'
     "Document content:\n\n{text}"
 )
 
 
-async def _run_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, status_msg) -> int:
-    """Core quiz generation — shared by message and callback entry points."""
+async def _run_quiz(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    status_msg,
+) -> int:
+    """Core quiz generation shared by message and callback entry points.
+
+    Sends a native Telegram quiz poll (Telegram handles A/B/C/D selection and
+    explanation popup automatically) plus a 'Need a Hint?' inline button.
+    Returns ConversationHandler.END — no text reply needed from the user.
+    """
     if not await _require_parsed_text(update, context):
         return ConversationHandler.END
 
     parsed_text = _get_parsed_text(context)
     difficulty = context.user_data.get("quiz_difficulty", "intermediate")
     difficulty_label = _DIFFICULTY_LABELS.get(difficulty, "Intermediate 🟡")
-    difficulty_instr = _DIFFICULTY_INSTRUCTIONS.get(difficulty, _DIFFICULTY_INSTRUCTIONS["intermediate"])
+    difficulty_instr = _DIFFICULTY_INSTRUCTIONS.get(
+        difficulty, _DIFFICULTY_INSTRUCTIONS["intermediate"]
+    )
 
     try:
-        client = get_client()
         prompt = QUIZ_PROMPT_TEMPLATE.format(
             difficulty_instruction=difficulty_instr,
             text=parsed_text,
         )
-        response = await asyncio.to_thread(
-            client.models.generate_content,
-            model=MODEL,
+        response = await generate_with_retry(
             contents=[prompt],
-            config={"response_mime_type": "application/json"},
+            response_mime_type="application/json",
         )
         data = json.loads(response.text)
     except Exception as exc:
         logger.exception("Quiz generation failed")
         context.user_data.pop("quiz_pending", None)
-        await status_msg.edit_text(f"❌ Couldn't generate a quiz question: {exc}\n\n{NAV_FOOTER}", parse_mode="HTML")
+        try:
+            await status_msg.edit_text(
+                f"❌ Couldn't generate a quiz question: {exc}\n\n{NAV_FOOTER}",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
         return ConversationHandler.END
 
-    context.user_data["quiz_pending"] = data
+    # --- Safety truncation (Telegram hard limits) ---
+    question_raw = str(data.get("question", ""))[:300]
+    options_raw = data.get("options", {})
+    options_list = [
+        str(options_raw.get("A", "Option A"))[:100],
+        str(options_raw.get("B", "Option B"))[:100],
+        str(options_raw.get("C", "Option C"))[:100],
+        str(options_raw.get("D", "Option D"))[:100],
+    ]
+    correct_letter = str(data.get("correct_option", "A")).strip().upper()[:1]
+    correct_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(correct_letter, 0)
+    explanation = str(data.get("explanation", ""))[:200]
+    hint = str(data.get("hint", "No hint available for this question."))[:200]
 
-    options_text = "\n".join(f"{k}. {v}" for k, v in data["options"].items())
-    quiz_text = (
-        f"❓ <b>Quiz Question</b> <i>({difficulty_label})</i>\n\n"
-        f"{data['question']}\n\n{options_text}\n\n"
-        "Reply with the letter of your answer (A, B, C, or D)."
-        + NAV_FOOTER
+    # Store hint for the callback handler.
+    context.user_data["quiz_hint"] = hint
+
+    # Prefix the question with the difficulty label (stays under 300 chars).
+    poll_question = f"[{difficulty_label}] {question_raw}"[:300]
+
+    # Remove the "Generating…" status message before sending the poll.
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
+
+    # --- Send native Telegram quiz poll ---
+    await context.bot.send_poll(
+        chat_id=chat_id,
+        question=poll_question,
+        options=options_list,
+        type="quiz",
+        correct_option_id=correct_idx,
+        explanation=explanation,
+        is_anonymous=False,
     )
-    await send_html_report(status_msg, quiz_text, context.bot, chat_id)
-    return QUIZ_ANSWER
+
+    # --- Send hint button below the poll ---
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            "<i>Tap 💡 for a hint · /quiz to generate another question</i>"
+            + NAV_FOOTER
+        ),
+        parse_mode="HTML",
+        reply_markup=_HINT_KB,
+    )
+
+    return ConversationHandler.END
 
 
 async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -153,14 +221,16 @@ async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         return ConversationHandler.END
     await typing_action(context.bot, update.effective_chat.id)
     context.user_data.setdefault("quiz_difficulty", "intermediate")
-    status_msg = await update.message.reply_text("🧠 Generating a quiz question from your document...")
+    status_msg = await update.message.reply_text(
+        "🧠 Generating a quiz question from your document..."
+    )
     return await _run_quiz(update, context, update.effective_chat.id, status_msg)
 
 
 async def quiz_difficulty_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Entry via Beginner/Intermediate/Advanced inline buttons."""
+    """Entry via Beginner / Intermediate / Advanced inline buttons."""
     query = update.callback_query
-    difficulty = query.data.split(":")[1]  # beginner | intermediate | advanced
+    difficulty = query.data.split(":")[1]
     context.user_data["quiz_difficulty"] = difficulty
 
     if not await _require_parsed_text(update, context):
@@ -176,35 +246,8 @@ async def quiz_difficulty_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return await _run_quiz(update, context, update.effective_chat.id, status_msg)
 
 
-async def quiz_evaluate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    pending = context.user_data.get("quiz_pending")
-    if not pending:
-        return ConversationHandler.END
-
-    status_msg = await update.message.reply_text("📊 Grading your answer...")
-
-    try:
-        user_answer = update.message.text.strip().upper()[:1]
-        correct = pending["correct_option"].strip().upper()
-        is_correct = user_answer == correct
-
-        result_line = "✅ Correct!" if is_correct else f"❌ Not quite — the correct answer was {correct}."
-        result_text = (
-            f"{result_line}\n\n<b>Explanation:</b>\n{pending['explanation']}\n\n"
-            "Use /quiz for another question."
-        )
-        await send_html_report(status_msg, result_text, context.bot, update.effective_chat.id)
-    except Exception as exc:
-        logger.exception("Quiz evaluation failed")
-        await status_msg.edit_text(f"❌ Couldn't grade your answer: {exc}")
-    finally:
-        context.user_data.pop("quiz_pending", None)
-
-    return ConversationHandler.END
-
-
 async def quiz_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data.pop("quiz_pending", None)
+    context.user_data.pop("quiz_hint", None)
     await update.message.reply_text("Quiz cancelled. Use /start to return to the menu.")
     return ConversationHandler.END
 
@@ -214,9 +257,12 @@ def get_quiz_handler() -> ConversationHandler:
         entry_points=[
             CommandHandler("quiz", quiz_command),
             MessageHandler(filters.Regex("^📚 Generate Quiz$"), quiz_command),
-            CallbackQueryHandler(quiz_difficulty_cb, pattern=r"^quiz:(beginner|intermediate|advanced)$"),
+            CallbackQueryHandler(
+                quiz_difficulty_cb,
+                pattern=r"^quiz:(beginner|intermediate|advanced)$",
+            ),
         ],
-        states={QUIZ_ANSWER: [MessageHandler(filters.TEXT & ~filters.COMMAND, quiz_evaluate)]},
+        states={},  # Poll flow ends immediately; no text-reply state needed.
         fallbacks=[CommandHandler("cancel", quiz_cancel)],
         per_message=False,
     )
@@ -232,7 +278,7 @@ INTERVIEW_PROMPT_TEMPLATE = (
     "interview question that a Security Engineer candidate should be able to answer, grounded "
     "in the document's content.\n\n"
     "Respond ONLY with JSON in this exact shape:\n"
-    '{"question": "...", "key_points": ["...", "..."]}\n\n'
+    '{{"question": "...", "key_points": ["...", "..."]}}\n\n'
     "All values MUST be plain text only (no HTML tags, no Markdown).\n\n"
     "Document content:\n\n{text}"
 )
@@ -243,16 +289,15 @@ async def interview_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return ConversationHandler.END
     await typing_action(context.bot, update.effective_chat.id)
     parsed_text = _get_parsed_text(context)
-    status_msg = await update.message.reply_text("🎤 Preparing a mock interview question from your document...")
+    status_msg = await update.message.reply_text(
+        "🎤 Preparing a mock interview question from your document..."
+    )
 
     try:
-        client = get_client()
         prompt = INTERVIEW_PROMPT_TEMPLATE.format(text=parsed_text)
-        response = await asyncio.to_thread(
-            client.models.generate_content,
-            model=MODEL,
+        response = await generate_with_retry(
             contents=[prompt],
-            config={"response_mime_type": "application/json"},
+            response_mime_type="application/json",
         )
         data = json.loads(response.text)
     except Exception as exc:
@@ -295,14 +340,13 @@ async def interview_evaluate(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
     try:
-        client = get_client()
-        response = await asyncio.to_thread(
-            client.models.generate_content,
-            model=MODEL,
-            contents=[eval_prompt],
+        response = await generate_with_retry(contents=[eval_prompt])
+        feedback_text = (
+            f"📝 <b>Feedback</b>\n\n{response.text}\n\nUse /interview for another question."
         )
-        feedback_text = f"📝 <b>Feedback</b>\n\n{response.text}\n\nUse /interview for another question."
-        await send_html_report(status_msg, feedback_text, context.bot, update.effective_chat.id)
+        await send_html_report(
+            status_msg, feedback_text, context.bot, update.effective_chat.id
+        )
     except Exception as exc:
         logger.exception("Interview evaluation failed")
         await status_msg.edit_text(f"❌ Couldn't evaluate your answer: {exc}")
@@ -314,7 +358,9 @@ async def interview_evaluate(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def interview_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.pop("interview_pending", None)
-    await update.message.reply_text("Interview practice cancelled. Use /start to return to the menu.")
+    await update.message.reply_text(
+        "Interview practice cancelled. Use /start to return to the menu."
+    )
     return ConversationHandler.END
 
 
@@ -324,8 +370,13 @@ def get_interview_handler() -> ConversationHandler:
             CommandHandler("interview", interview_command),
             MessageHandler(filters.Regex("^💼 Mock Interview$"), interview_command),
         ],
-        states={INTERVIEW_ANSWER: [MessageHandler(filters.TEXT & ~filters.COMMAND, interview_evaluate)]},
+        states={
+            INTERVIEW_ANSWER: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, interview_evaluate)
+            ]
+        },
         fallbacks=[CommandHandler("cancel", interview_cancel)],
+        per_message=False,
     )
 
 
@@ -349,18 +400,17 @@ async def scenario_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await typing_action(context.bot, update.effective_chat.id)
     parsed_text = _get_parsed_text(context)
-    status_msg = await update.message.reply_text("🧪 Building an incident response scenario from your document...")
+    status_msg = await update.message.reply_text(
+        "🧪 Building an incident response scenario from your document..."
+    )
 
     try:
-        client = get_client()
         prompt = SCENARIO_PROMPT_TEMPLATE.format(text=parsed_text)
-        response = await asyncio.to_thread(
-            client.models.generate_content,
-            model=MODEL,
-            contents=[prompt],
-        )
+        response = await generate_with_retry(contents=[prompt])
         scenario_text = f"🧪 <b>Incident Response Scenario</b>\n\n{response.text}"
-        await send_html_report(status_msg, scenario_text, context.bot, update.effective_chat.id)
+        await send_html_report(
+            status_msg, scenario_text, context.bot, update.effective_chat.id
+        )
     except Exception as exc:
         logger.exception("Scenario generation failed")
         context.user_data.pop("quiz_pending", None)

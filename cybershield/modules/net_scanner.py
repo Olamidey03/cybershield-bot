@@ -1,4 +1,3 @@
-import asyncio
 import logging
 
 from telegram import Update
@@ -11,37 +10,46 @@ from telegram.ext import (
     filters,
 )
 
-from modules.gemini_client import get_client, MODEL
+from modules.gemini_client import generate_with_retry
 from modules.html_utils import safe_reply_html, send_html_report, typing_action, NAV_FOOTER
 
 logger = logging.getLogger(__name__)
 
 WAITING_SCAN_DATA = 0
 
+# ---------------------------------------------------------------------------
+# Security Engineer prompt — bash/config remediation report
+# ---------------------------------------------------------------------------
 SCANNER_PROMPT = (
-    "You are an expert Penetration Tester performing recon analysis. Analyze the following "
-    "Nmap scan output, target port list, or asset/service data.\n\n"
-    "Format your ENTIRE response using clean HTML tags compatible with Telegram's HTML parse "
-    "mode. Use ONLY these tags: <b> for section headers and emphasis, <i> for italics, and "
-    "<pre><code>...</code></pre> for any raw commands, ports, or technical output. Do NOT use "
-    "Markdown syntax at all (no **, no *, no backtick fences). Escape any literal '<' or '>' "
-    "characters that appear inside your own explanatory text (not part of a tag) as '&lt;' and "
-    "'&gt;' so the HTML stays valid.\n\n"
-    "Structure the response with EXACTLY these four section headers, each wrapped in <b> tags, "
-    "in this order:\n\n"
-    "<b>Vulnerability Assessment</b> — list concrete vulnerabilities found, referencing CVE IDs where applicable.\n"
-    "<b>Attack Surface Exposure</b> — summarize exposed services, ports, and versions that widen the attack surface.\n"
-    "<b>Exploitability Vectors</b> — describe realistic exploitation paths an attacker could use.\n"
-    "<b>Technical Remediation &amp; Patching Guide</b> — give concrete, actionable remediation and patching steps.\n\n"
-    "Base every finding strictly on the data provided below. If the data is insufficient for a "
-    "section, say so explicitly rather than inventing findings.\n\n"
-    "DATA:\n{data}"
+    "You are a Security Engineer performing a professional pentest recon analysis on the "
+    "scan data provided below. Your output must be a structured, actionable security report.\n\n"
+    "Structure your response with EXACTLY these four sections, each headed by a <b> tag:\n\n"
+    "<b>Open Port & Service Map</b>\n"
+    "List every discovered port in an ASCII table inside <pre><code> tags:\n"
+    "| Port | Protocol | Service | Version | Risk Level |\n"
+    "Risk Level must be one of: Info, Low, Medium, High, Critical.\n\n"
+    "<b>Vulnerability Assessment</b>\n"
+    "List concrete vulnerabilities found. Reference CVE IDs in <i> tags where applicable. "
+    "For each finding include: affected service, CVE (if known), and a one-line impact summary.\n\n"
+    "<b>Attack Surface & Exploitability</b>\n"
+    "Describe realistic exploitation paths an attacker could chain from the discovered surface. "
+    "Include MITRE ATT&CK technique IDs in <i> tags where relevant.\n\n"
+    "<b>Bash / Config Remediation Report</b>\n"
+    "For every High or Critical finding, provide the exact shell command or config change that "
+    "fixes it. Each command block MUST be wrapped in <pre><code>...</code></pre>. "
+    "Prefix each block with a plain-text one-line description of what it does.\n\n"
+    "Rules:\n"
+    "• Use ONLY HTML tags compatible with Telegram: <b>, <i>, <pre><code>. No Markdown.\n"
+    "• Escape literal < or > inside explanatory text as &lt; and &gt;.\n"
+    "• Base every finding strictly on the data provided. State clearly if data is insufficient.\n\n"
+    "SCAN DATA:\n{data}"
 )
 
 _ENTRY_MSG = (
-    "🌐 <b>AI Network Scanner — Pentest Analysis</b>\n\n"
-    "Paste an Nmap scan output, target port list, or asset/service data and I'll analyze it "
-    "as an expert penetration tester.\n\n"
+    "🌐 <b>AI Network Scanner — Security Engineer Analysis</b>\n\n"
+    "Paste an Nmap scan output, target port list, or asset/service data and I'll produce a "
+    "structured security report: port map, vulnerability assessment, exploitability analysis, "
+    "and exact bash/config remediation commands.\n\n"
     + NAV_FOOTER
 )
 
@@ -67,14 +75,13 @@ async def start_scanner_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def analyze_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await typing_action(context.bot, update.effective_chat.id)
     data = update.message.text
-    status_msg = await update.message.reply_text("🔎 Analyzing scan data as a pentester, please wait...")
+    status_msg = await update.message.reply_text(
+        "🔎 Running Security Engineer pentest analysis, please wait..."
+    )
 
     try:
-        client = get_client()
-        response = await asyncio.to_thread(
-            client.models.generate_content,
-            model=MODEL,
-            contents=SCANNER_PROMPT.format(data=data),
+        response = await generate_with_retry(
+            contents=SCANNER_PROMPT.format(data=data)
         )
         result_text = response.text
     except Exception as exc:
@@ -102,7 +109,9 @@ def get_network_scanner_handler() -> ConversationHandler:
             CallbackQueryHandler(start_scanner_cb, pattern=r"^menu:scan$"),
         ],
         states={
-            WAITING_SCAN_DATA: [MessageHandler(filters.TEXT & ~filters.COMMAND, analyze_scan)],
+            WAITING_SCAN_DATA: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, analyze_scan)
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel_scanner)],
         per_message=False,

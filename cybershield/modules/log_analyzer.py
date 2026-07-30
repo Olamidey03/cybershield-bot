@@ -1,4 +1,3 @@
-import asyncio
 import logging
 
 from telegram import Update
@@ -11,38 +10,47 @@ from telegram.ext import (
     filters,
 )
 
-from modules.gemini_client import get_client, MODEL
+from modules.gemini_client import generate_with_retry
 from modules.html_utils import safe_reply_html, send_html_report, typing_action, NAV_FOOTER
 
 logger = logging.getLogger(__name__)
 
 WAITING_LOG_DATA = 0
 
+# ---------------------------------------------------------------------------
+# Tier 2 SOC Analyst prompt — table output inside <pre><code> blocks
+# ---------------------------------------------------------------------------
 LOG_ANALYZER_PROMPT = (
-    "You are a senior SOC Threat Hunter analyzing raw log data (SIEM, Apache, Linux auth, or "
-    "firewall events).\n\n"
-    "Format your ENTIRE response using clean HTML tags compatible with Telegram's HTML parse "
-    "mode. Use ONLY these tags: <b> for section headers and emphasis, <i> for italics, and "
-    "<pre><code>...</code></pre> for any raw log lines or technical output. Do NOT use Markdown "
-    "syntax at all (no **, no *, no backtick fences). Escape any literal '<' or '>' characters "
-    "that appear inside your own explanatory text (not part of a tag) as '&lt;' and '&gt;' so "
-    "the HTML stays valid.\n\n"
-    "Structure the response with EXACTLY these four section headers, each wrapped in <b> tags, "
-    "in this order:\n\n"
-    "<b>Identified Indicators of Compromise (IoCs)</b> — list specific IPs, accounts, URIs, or patterns of concern.\n"
-    "<b>Threat Actor Intent/Tactics</b> — describe likely intent and map observed behavior to MITRE ATT&amp;CK "
-    "technique IDs and names (e.g. T1110 Brute Force).\n"
-    "<b>Severity Rating</b> — state exactly one of: Low, Medium, High, or Critical, with a one-line justification.\n"
-    "<b>Immediate Incident Response Actions</b> — give concrete, actionable containment steps to take right now.\n\n"
-    "Base every finding strictly on the data provided below. If the data is insufficient for a "
-    "section, say so explicitly rather than inventing findings.\n\n"
+    "You are a Tier 2 SOC Analyst performing a deep-dive threat hunt on the raw log data "
+    "provided below. Specifically scan for: brute-force login attempts, unauthorized SSH "
+    "access, and privilege escalation events.\n\n"
+    "Structure your response with EXACTLY these four sections, each headed by a <b> tag:\n\n"
+    "<b>Findings Table</b>\n"
+    "Output an ASCII table inside <pre><code> tags with these columns:\n"
+    "| Finding Type | Source IP / User | Count / Details | Severity | Recommended Action |\n"
+    "Use --- as the column separator row. List every distinct finding as its own row. "
+    "If no findings exist for a category write 'None detected'.\n\n"
+    "<b>Threat Actor Intent & MITRE ATT&CK Mapping</b>\n"
+    "Describe likely intent and map each observed behavior to a MITRE ATT&CK technique ID "
+    "and name (e.g. T1110.001 — Password Spraying). Use <i> for technique IDs.\n\n"
+    "<b>Severity Rating</b>\n"
+    "State exactly one of: Low, Medium, High, or Critical — wrapped in <b> — followed by a "
+    "one-sentence justification.\n\n"
+    "<b>Immediate Incident Response Actions</b>\n"
+    "Give 3–5 concrete, numbered containment steps. Put any shell or config commands inside "
+    "<pre><code>...</code></pre> blocks.\n\n"
+    "Rules:\n"
+    "• Use ONLY HTML tags compatible with Telegram: <b>, <i>, <pre><code>. No Markdown.\n"
+    "• Escape literal < or > inside explanatory text as &lt; and &gt;.\n"
+    "• Base every finding strictly on the data provided. Do NOT invent findings.\n\n"
     "LOG DATA:\n{data}"
 )
 
 _ENTRY_MSG = (
-    "🧾 <b>AI Log Analyzer — SOC Threat Hunt</b>\n\n"
+    "🧾 <b>AI Log Analyzer — Tier 2 SOC Threat Hunt</b>\n\n"
     "Paste raw log lines (SIEM, Apache, Linux auth, or firewall events) and I'll analyze them "
-    "as a senior SOC threat hunter.\n\n"
+    "as a Tier 2 SOC Analyst, scanning for brute-force, unauthorized SSH, and privilege "
+    "escalation — with a structured findings table and MITRE ATT&amp;CK mapping.\n\n"
     + NAV_FOOTER
 )
 
@@ -68,14 +76,13 @@ async def start_log_analyzer_cb(update: Update, context: ContextTypes.DEFAULT_TY
 async def analyze_logs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await typing_action(context.bot, update.effective_chat.id)
     data = update.message.text
-    status_msg = await update.message.reply_text("🕵️ Hunting for threats in the log data, please wait...")
+    status_msg = await update.message.reply_text(
+        "🕵️ Running Tier 2 SOC threat hunt on the log data, please wait..."
+    )
 
     try:
-        client = get_client()
-        response = await asyncio.to_thread(
-            client.models.generate_content,
-            model=MODEL,
-            contents=LOG_ANALYZER_PROMPT.format(data=data),
+        response = await generate_with_retry(
+            contents=LOG_ANALYZER_PROMPT.format(data=data)
         )
         result_text = response.text
     except Exception as exc:
@@ -103,7 +110,9 @@ def get_log_analyzer_handler() -> ConversationHandler:
             CallbackQueryHandler(start_log_analyzer_cb, pattern=r"^menu:log$"),
         ],
         states={
-            WAITING_LOG_DATA: [MessageHandler(filters.TEXT & ~filters.COMMAND, analyze_logs)],
+            WAITING_LOG_DATA: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, analyze_logs)
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel_log_analyzer)],
         per_message=False,
