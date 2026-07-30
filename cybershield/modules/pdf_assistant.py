@@ -4,6 +4,7 @@ import logging
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
+    CallbackQueryHandler,
     ContextTypes,
     ConversationHandler,
     CommandHandler,
@@ -12,7 +13,7 @@ from telegram.ext import (
 )
 
 from modules.gemini_client import get_client, MODEL
-from modules.html_utils import send_html_report
+from modules.html_utils import send_html_report, typing_action, NAV_FOOTER
 
 logger = logging.getLogger(__name__)
 
@@ -38,35 +39,61 @@ HTML_FORMAT_RULES = (
     "so the HTML stays valid."
 )
 
+_DIFFICULTY_LABELS = {
+    "beginner": "Beginner 🟢",
+    "intermediate": "Intermediate 🟡",
+    "advanced": "Advanced 🔴",
+}
+
+_DIFFICULTY_INSTRUCTIONS = {
+    "beginner": (
+        "The question should be suitable for a beginner: use clear language, avoid deep "
+        "technical jargon, and test foundational understanding only."
+    ),
+    "intermediate": (
+        "The question should be at an intermediate level: assume working knowledge of "
+        "cybersecurity fundamentals and test applied understanding."
+    ),
+    "advanced": (
+        "The question should be advanced and technical: assume expert-level knowledge and "
+        "test deep, nuanced understanding or complex scenario analysis."
+    ),
+}
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
 
 def _get_parsed_text(context: ContextTypes.DEFAULT_TYPE) -> str | None:
-    """Return the text previously extracted by the Input Parsing Engine, or None."""
     return context.user_data.get("parsed_text")
 
 
 async def _require_parsed_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Reply with a friendly prompt if no document/text has been parsed yet."""
+    """Works for both Message and CallbackQuery updates."""
     if not _get_parsed_text(context):
-        await update.message.reply_text(
+        msg = (
             "📎 Please upload a document (.pdf, .docx, .txt, or .csv) or paste your text "
-            "first, then try this command again."
+            "first, then try this command again.\n\n"
+            + NAV_FOOTER
         )
+        if update.callback_query:
+            await update.callback_query.edit_message_text(msg, parse_mode="HTML")
+        else:
+            await update.message.reply_text(msg, parse_mode="HTML")
         return False
     return True
 
 
 # ---------------------------------------------------------------------------
-# /quiz
+# /quiz  (also triggered by difficulty inline buttons)
 # ---------------------------------------------------------------------------
 
 QUIZ_PROMPT_TEMPLATE = (
     "You are a cybersecurity instructor. Based EXCLUSIVELY on the document content provided "
     "below, write one challenging multiple-choice technical cybersecurity question that tests "
     "understanding of its content.\n\n"
+    "{difficulty_instruction}\n\n"
     "Respond ONLY with JSON in this exact shape:\n"
     '{"question": "...", "options": {"A": "...", "B": "...", "C": "...", "D": "..."}, '
     '"correct_option": "A", "explanation": "..."}\n\n'
@@ -78,16 +105,22 @@ QUIZ_PROMPT_TEMPLATE = (
 )
 
 
-async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def _run_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, status_msg) -> int:
+    """Core quiz generation — shared by message and callback entry points."""
     if not await _require_parsed_text(update, context):
         return ConversationHandler.END
 
     parsed_text = _get_parsed_text(context)
-    status_msg = await update.message.reply_text("🧠 Generating a quiz question from your document...")
+    difficulty = context.user_data.get("quiz_difficulty", "intermediate")
+    difficulty_label = _DIFFICULTY_LABELS.get(difficulty, "Intermediate 🟡")
+    difficulty_instr = _DIFFICULTY_INSTRUCTIONS.get(difficulty, _DIFFICULTY_INSTRUCTIONS["intermediate"])
 
     try:
         client = get_client()
-        prompt = QUIZ_PROMPT_TEMPLATE.format(text=parsed_text)
+        prompt = QUIZ_PROMPT_TEMPLATE.format(
+            difficulty_instruction=difficulty_instr,
+            text=parsed_text,
+        )
         response = await asyncio.to_thread(
             client.models.generate_content,
             model=MODEL,
@@ -98,18 +131,49 @@ async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     except Exception as exc:
         logger.exception("Quiz generation failed")
         context.user_data.pop("quiz_pending", None)
-        await status_msg.edit_text(f"❌ Couldn't generate a quiz question: {exc}")
+        await status_msg.edit_text(f"❌ Couldn't generate a quiz question: {exc}\n\n{NAV_FOOTER}", parse_mode="HTML")
         return ConversationHandler.END
 
     context.user_data["quiz_pending"] = data
 
     options_text = "\n".join(f"{k}. {v}" for k, v in data["options"].items())
     quiz_text = (
-        f"❓ <b>Quiz Question</b>\n\n{data['question']}\n\n{options_text}\n\n"
+        f"❓ <b>Quiz Question</b> <i>({difficulty_label})</i>\n\n"
+        f"{data['question']}\n\n{options_text}\n\n"
         "Reply with the letter of your answer (A, B, C, or D)."
+        + NAV_FOOTER
     )
-    await send_html_report(status_msg, quiz_text, context.bot, update.effective_chat.id)
+    await send_html_report(status_msg, quiz_text, context.bot, chat_id)
     return QUIZ_ANSWER
+
+
+async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Entry via /quiz text command or keyboard button."""
+    if not await _require_parsed_text(update, context):
+        return ConversationHandler.END
+    await typing_action(context.bot, update.effective_chat.id)
+    context.user_data.setdefault("quiz_difficulty", "intermediate")
+    status_msg = await update.message.reply_text("🧠 Generating a quiz question from your document...")
+    return await _run_quiz(update, context, update.effective_chat.id, status_msg)
+
+
+async def quiz_difficulty_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Entry via Beginner/Intermediate/Advanced inline buttons."""
+    query = update.callback_query
+    difficulty = query.data.split(":")[1]  # beginner | intermediate | advanced
+    context.user_data["quiz_difficulty"] = difficulty
+
+    if not await _require_parsed_text(update, context):
+        return ConversationHandler.END
+
+    await query.answer(f"Difficulty set to {_DIFFICULTY_LABELS.get(difficulty, difficulty)}")
+    await typing_action(context.bot, update.effective_chat.id)
+
+    status_msg = await query.edit_message_text(
+        f"🧠 Generating a <b>{_DIFFICULTY_LABELS[difficulty]}</b> quiz question...",
+        parse_mode="HTML",
+    )
+    return await _run_quiz(update, context, update.effective_chat.id, status_msg)
 
 
 async def quiz_evaluate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -150,9 +214,11 @@ def get_quiz_handler() -> ConversationHandler:
         entry_points=[
             CommandHandler("quiz", quiz_command),
             MessageHandler(filters.Regex("^📚 Generate Quiz$"), quiz_command),
+            CallbackQueryHandler(quiz_difficulty_cb, pattern=r"^quiz:(beginner|intermediate|advanced)$"),
         ],
         states={QUIZ_ANSWER: [MessageHandler(filters.TEXT & ~filters.COMMAND, quiz_evaluate)]},
         fallbacks=[CommandHandler("cancel", quiz_cancel)],
+        per_message=False,
     )
 
 
@@ -175,7 +241,7 @@ INTERVIEW_PROMPT_TEMPLATE = (
 async def interview_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not await _require_parsed_text(update, context):
         return ConversationHandler.END
-
+    await typing_action(context.bot, update.effective_chat.id)
     parsed_text = _get_parsed_text(context)
     status_msg = await update.message.reply_text("🎤 Preparing a mock interview question from your document...")
 
@@ -200,6 +266,7 @@ async def interview_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     question_text = (
         f"🎤 <b>Mock Interview Question</b>\n\n{data['question']}\n\n"
         "Reply with your answer when ready."
+        + NAV_FOOTER
     )
     await send_html_report(status_msg, question_text, context.bot, update.effective_chat.id)
     return INTERVIEW_ANSWER
@@ -210,6 +277,7 @@ async def interview_evaluate(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not pending:
         return ConversationHandler.END
 
+    await typing_action(context.bot, update.effective_chat.id)
     status_msg = await update.message.reply_text("🧠 Evaluating your answer...")
 
     user_answer = update.message.text
@@ -279,7 +347,7 @@ SCENARIO_PROMPT_TEMPLATE = (
 async def scenario_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _require_parsed_text(update, context):
         return
-
+    await typing_action(context.bot, update.effective_chat.id)
     parsed_text = _get_parsed_text(context)
     status_msg = await update.message.reply_text("🧪 Building an incident response scenario from your document...")
 

@@ -1,6 +1,10 @@
 import re
+from telegram.constants import ChatAction
 
 MAX_MESSAGE_LENGTH = 4000
+
+# Standard footer appended to every delivered AI report.
+NAV_FOOTER = "\n\n💡 <i>Type /cancel to exit · /start for a new task.</i>"
 
 _TAG_RE = re.compile(r"<[^>]+>")
 _ANY_TAG_RE = re.compile(r"</?(\w+)(?:\s[^>]*)?>")
@@ -96,12 +100,10 @@ async def safe_edit_html(status_msg, text: str):
 async def send_html_report(status_msg, text: str, bot, chat_id: int):
     """Deliver a (possibly long) AI-generated HTML report safely.
 
-    If the report fits in a single Telegram message, the status message is
-    simply edited in place. If it's too long (Telegram's ~4096 char limit),
-    it is split into chunks: the status message is edited with the first
-    chunk, and every remaining chunk is sent as a brand-new message via
-    `bot.send_message` so nothing gets dropped or crashes with
-    `Message_too_long`.
+    Appends NAV_FOOTER to the final chunk. If the report fits in a single
+    Telegram message the status message is edited in place. If it's too long
+    it is split into chunks; the status message receives the first chunk and
+    every remaining chunk is sent as a new message so nothing is dropped.
     """
     chunks = split_message(text)
     if not chunks:
@@ -109,7 +111,10 @@ async def send_html_report(status_msg, text: str, bot, chat_id: int):
 
     total = len(chunks)
     if total > 1:
-        chunks = [f"<i>(Continued {i}/{total})</i>\n{chunk}" for i, chunk in enumerate(chunks, start=1)]
+        chunks = [f"<i>(Part {i}/{total})</i>\n{chunk}" for i, chunk in enumerate(chunks, start=1)]
+
+    # Append the navigation footer to the last chunk only.
+    chunks[-1] = chunks[-1] + NAV_FOOTER
 
     await safe_edit_html(status_msg, chunks[0])
 
@@ -118,3 +123,19 @@ async def send_html_report(status_msg, text: str, bot, chat_id: int):
             await bot.send_message(chat_id=chat_id, text=chunk, parse_mode="HTML")
         except Exception:
             await bot.send_message(chat_id=chat_id, text=_strip_tags(chunk))
+
+
+async def typing_action(bot, chat_id: int):
+    """Fire a one-shot 'typing…' indicator."""
+    try:
+        await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    except Exception:
+        pass
+
+
+async def upload_action(bot, chat_id: int):
+    """Fire a one-shot 'uploading document…' indicator."""
+    try:
+        await bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
+    except Exception:
+        pass

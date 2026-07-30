@@ -3,6 +3,7 @@ import logging
 
 from telegram import Update
 from telegram.ext import (
+    CallbackQueryHandler,
     ContextTypes,
     ConversationHandler,
     CommandHandler,
@@ -11,7 +12,7 @@ from telegram.ext import (
 )
 
 from modules.gemini_client import get_client, MODEL
-from modules.html_utils import safe_reply_html, send_html_report
+from modules.html_utils import safe_reply_html, send_html_report, typing_action, NAV_FOOTER
 
 logger = logging.getLogger(__name__)
 
@@ -37,19 +38,34 @@ SCANNER_PROMPT = (
     "DATA:\n{data}"
 )
 
+_ENTRY_MSG = (
+    "🌐 <b>AI Network Scanner — Pentest Analysis</b>\n\n"
+    "Paste an Nmap scan output, target port list, or asset/service data and I'll analyze it "
+    "as an expert penetration tester.\n\n"
+    + NAV_FOOTER
+)
+
 
 async def start_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await safe_reply_html(
-        update.message,
-        "🌐 <b>AI Network Scanner — Pentest Analysis</b>\n\n"
-        "Paste an Nmap scan output, target port list, or asset/service data and I'll analyze it "
-        "as an expert penetration tester.\n\n"
-        "Type /cancel to go back.",
+    await safe_reply_html(update.message, _ENTRY_MSG)
+    return WAITING_SCAN_DATA
+
+
+async def start_scanner_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Entry point triggered by the 🌐 Network Scan inline button."""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_reply_markup(reply_markup=None)
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=_ENTRY_MSG,
+        parse_mode="HTML",
     )
     return WAITING_SCAN_DATA
 
 
 async def analyze_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await typing_action(context.bot, update.effective_chat.id)
     data = update.message.text
     status_msg = await update.message.reply_text("🔎 Analyzing scan data as a pentester, please wait...")
 
@@ -63,11 +79,13 @@ async def analyze_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         result_text = response.text
     except Exception as exc:
         logger.exception("Network scan analysis failed")
-        await status_msg.edit_text(f"❌ Analysis failed: {exc}")
+        await status_msg.edit_text(
+            f"❌ Analysis failed: {exc}\n\n"
+            "Paste more scan data to try again, or /cancel to exit."
+        )
         return WAITING_SCAN_DATA
 
     await send_html_report(status_msg, result_text, context.bot, update.effective_chat.id)
-
     await update.message.reply_text("Paste more scan data to analyze, or /cancel to go back.")
     return WAITING_SCAN_DATA
 
@@ -79,9 +97,13 @@ async def cancel_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 def get_network_scanner_handler() -> ConversationHandler:
     return ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^3 Network Scanner$"), start_scanner)],
+        entry_points=[
+            MessageHandler(filters.Regex("^3 Network Scanner$"), start_scanner),
+            CallbackQueryHandler(start_scanner_cb, pattern=r"^menu:scan$"),
+        ],
         states={
             WAITING_SCAN_DATA: [MessageHandler(filters.TEXT & ~filters.COMMAND, analyze_scan)],
         },
         fallbacks=[CommandHandler("cancel", cancel_scanner)],
+        per_message=False,
     )

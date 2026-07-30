@@ -1,9 +1,15 @@
 import os
 import logging
+import warnings
+from telegram.warnings import PTBUserWarning
+# CallbackQueryHandler inside ConversationHandler (entry_points only) is
+# intentional — suppress the cosmetic per_message advisory.
+warnings.filterwarnings("ignore", category=PTBUserWarning)
 from dotenv import load_dotenv
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
     filters,
@@ -19,6 +25,7 @@ from modules.pdf_assistant import (
     scenario_command,
 )
 from modules.input_parser import handle_raw_text, handle_document
+from modules.menu import MAIN_MENU_KB, get_quiz_menu_callback_handler
 from keep_alive import keep_alive
 
 load_dotenv()
@@ -40,47 +47,52 @@ MAIN_MENU_KEYBOARD = ReplyKeyboardMarkup(
 )
 
 WELCOME_MESSAGE = (
-    "🛡️ *Welcome to CyberShield Assistant Bot!*\n\n"
+    "🛡️ <b>Welcome to CyberShield Assistant Bot!</b>\n\n"
     "Your personal cybersecurity toolkit on Telegram.\n\n"
-    "*Available Modules:*\n"
-    "1️⃣ *Risk Assessment* — Evaluate your security posture\n"
-    "2️⃣ *Password Analyzer* — Test password strength\n"
-    "3️⃣ *Network Scanner* — AI pentest analysis of scan data\n"
-    "4️⃣ *Log Analyzer* — AI SOC threat hunting on raw logs\n\n"
-    "📄 *Document Assistant:*\n"
-    "Send me a PDF, then use the buttons that appear to:\n"
-    "📚 Generate Quiz — cybersecurity quiz question\n"
-    "💼 Mock Interview — mock interview question\n"
-    "🚨 Run Incident Scenario — incident response lab scenario\n\n"
+    "<b>Available Modules:</b>\n"
+    "1️⃣ <b>Risk Assessment</b> — Evaluate your security posture\n"
+    "2️⃣ <b>Password Analyzer</b> — Test password strength\n"
+    "3️⃣ <b>Network Scanner</b> — AI pentest analysis of scan data\n"
+    "4️⃣ <b>Log Analyzer</b> — AI SOC threat hunting on raw logs\n\n"
+    "📄 <b>Document Assistant:</b>\n"
+    "Upload a PDF, DOCX, TXT, or CSV — then tap the inline buttons below "
+    "or use /quiz, /interview, /scenario.\n\n"
     "Select an option from the menu below to get started."
 )
 
 ABOUT_MESSAGE = (
-    "ℹ️ *About CyberShield*\n\n"
+    "ℹ️ <b>About CyberShield</b>\n\n"
     "CyberShield is a cybersecurity learning and assessment bot "
     "built to help you understand and apply security principles.\n\n"
-    "*Modules:*\n"
-    "• *Risk Assessment* — Based on industry-standard security controls\n"
-    "• *Password Analyzer* — Evaluates complexity, length, and patterns\n"
-    "• *Network Scanner* — Gemini-powered pentest analysis of Nmap/scan data "
+    "<b>Modules:</b>\n"
+    "• <b>Risk Assessment</b> — Based on industry-standard security controls\n"
+    "• <b>Password Analyzer</b> — Evaluates complexity, length, and patterns\n"
+    "• <b>Network Scanner</b> — Gemini-powered pentest analysis of Nmap/scan data "
     "(vulnerabilities, CVEs, attack surface, exploitability, remediation)\n"
-    "• *Log Analyzer* — Gemini-powered SOC threat hunting on raw logs "
-    "(IoCs, MITRE ATT&CK mapping, severity, containment actions)\n"
-    "• *Document Assistant* — Upload a PDF, then quiz yourself, practice "
+    "• <b>Log Analyzer</b> — Gemini-powered SOC threat hunting on raw logs "
+    "(IoCs, MITRE ATT&amp;CK mapping, severity, containment actions)\n"
+    "• <b>Document Assistant</b> — Upload a PDF/DOCX/TXT/CSV, then quiz yourself, practice "
     "mock interviews, or run incident response scenarios based on it\n\n"
-    "*Stack:* Python + python-telegram-bot + Gemini (google-genai, gemini-2.5-flash)\n\n"
+    "<b>Stack:</b> Python + python-telegram-bot + Gemini (google-genai, gemini-2.5-flash)\n\n"
     "Stay safe out there. 🔐"
 )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         WELCOME_MESSAGE,
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=MAIN_MENU_KEYBOARD,
+    )
+    # Show the inline quick-action buttons as a separate message so they
+    # stay visible and tappable without cluttering the welcome text.
+    await update.message.reply_text(
+        "⚡ <b>Quick actions:</b>",
+        parse_mode="HTML",
+        reply_markup=MAIN_MENU_KB,
     )
 
 async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(ABOUT_MESSAGE, parse_mode="Markdown")
+    await update.message.reply_text(ABOUT_MESSAGE, parse_mode="HTML")
 
 def main():
     token = os.environ.get("BOT_TOKEN")
@@ -92,27 +104,25 @@ def main():
 
     app = Application.builder().token(token).build()
 
-    # Conversation handlers (must be registered before catch-all handlers)
+    # --- Conversation handlers (must come before catch-all handlers) ---
     app.add_handler(get_risk_handler())
     app.add_handler(get_password_handler())
-    app.add_handler(get_network_scanner_handler())
-    app.add_handler(get_log_analyzer_handler())
-    app.add_handler(get_quiz_handler())
-    app.add_handler(get_interview_handler())
+    app.add_handler(get_network_scanner_handler())   # includes menu:scan callback entry
+    app.add_handler(get_log_analyzer_handler())       # includes menu:log callback entry
+    app.add_handler(get_quiz_handler())               # includes quiz:* difficulty callbacks
 
-    # PDF-based quiz/interview/scenario commands (text-entry points only —
-    # document uploads are now handled exclusively by the Input Parsing Engine below)
+    # --- Inline callback handlers (non-conversation) ---
+    app.add_handler(get_quiz_menu_callback_handler())  # menu:quiz → show difficulty sub-menu
+
+    # --- Simple command & menu button handlers ---
     app.add_handler(CommandHandler("scenario", scenario_command))
     app.add_handler(MessageHandler(filters.Regex("^🚨 Run Incident Scenario$"), scenario_command))
-
-    # Simple command + menu button handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Regex("^About$"), about))
 
-    # Input Parsing Engine — the single, exclusive entry point for ALL document
-    # uploads (.pdf, .docx, .txt, .csv) and pasted text that isn't already claimed
-    # by an active conversation. Must stay registered last so it never intercepts
-    # menu or conversation input.
+    # --- Input Parsing Engine (catch-all — must stay last) ---
+    # Handles all document uploads (.pdf, .docx, .txt, .csv) and plain-text
+    # pastes not claimed by any active conversation above.
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_raw_text))
 

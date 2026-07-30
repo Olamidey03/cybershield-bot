@@ -7,6 +7,8 @@ from docx import Document
 from telegram import Update
 from telegram.ext import ContextTypes
 
+from modules.html_utils import typing_action, upload_action, NAV_FOOTER
+
 logger = logging.getLogger(__name__)
 
 MAX_TEXT_LENGTH = 4000
@@ -60,8 +62,7 @@ def route_and_parse(filename: str, data: bytes) -> str:
 
 def _store_parsed_text(context: ContextTypes.DEFAULT_TYPE, text: str, source: str):
     """Securely hold extracted text in this user's in-memory session state
-    (context.user_data) — never written to disk. Serves as the placeholder
-    hand-off point for the next pipeline step (AI analysis)."""
+    (context.user_data) — never written to disk."""
     context.user_data["parsed_text"] = text
     context.user_data["parsed_source"] = source
 
@@ -69,21 +70,29 @@ def _store_parsed_text(context: ContextTypes.DEFAULT_TYPE, text: str, source: st
 async def handle_raw_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Capture pasted security data sent as plain text (not a command)."""
     try:
+        await typing_action(context.bot, update.effective_chat.id)
         text = update.message.text or ""
 
         if len(text) > MAX_TEXT_LENGTH:
             await update.message.reply_text(
-                f"⚠️ That's too much text ({len(text)} characters). "
-                f"Please paste data under {MAX_TEXT_LENGTH} characters, or upload it as a "
-                f".txt/.csv/.pdf/.docx file instead."
+                f"⚠️ That's too much text ({len(text):,} characters). "
+                f"Please paste data under {MAX_TEXT_LENGTH:,} characters, or upload it as a "
+                ".txt / .csv / .pdf / .docx file instead.\n\n"
+                + NAV_FOOTER,
+                parse_mode="HTML",
             )
             return
 
         _store_parsed_text(context, text, source="pasted text")
 
         await update.message.reply_text(
-            f"✅ Received pasted data — {len(text)} characters captured and stored in memory.\n\n"
-            "🔧 Next step (analysis) coming soon."
+            f"✅ <b>Text captured!</b> {len(text):,} characters stored in memory.\n\n"
+            "You can now use:\n"
+            "📚 /quiz — generate a quiz question\n"
+            "💼 /interview — mock interview question\n"
+            "🚨 /scenario — incident response scenario\n\n"
+            + NAV_FOOTER,
+            parse_mode="HTML",
         )
     except Exception as exc:
         logger.exception("Raw text handling failed")
@@ -93,8 +102,8 @@ async def handle_raw_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Securely download a document fully in memory and parse it by extension.
 
-    This is now the single, exclusive entry point for ALL supported document
-    types (.pdf, .docx, .txt, .csv) — nothing is ever written to local disk.
+    Single exclusive entry point for ALL supported document types
+    (.pdf, .docx, .txt, .csv) — nothing is ever written to local disk.
     """
     document = update.message.document
     if not document:
@@ -108,7 +117,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         size_mb = document.file_size / (1024 * 1024)
         await update.message.reply_text(
             f"⚠️ That file is too large ({size_mb:.1f} MB). "
-            "Please upload files under 15 MB."
+            "Please upload files under 15 MB.\n\n"
+            + NAV_FOOTER,
+            parse_mode="HTML",
         )
         return
 
@@ -117,10 +128,15 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not any(lower_name.endswith(ext) for ext in SUPPORTED_EXTENSIONS):
         ext_list = ", ".join(SUPPORTED_EXTENSIONS)
         await update.message.reply_text(
-            f"⚠️ Unsupported file type: \"{filename}\". "
-            f"Supported formats are: {ext_list}"
+            f"⚠️ Unsupported file type: \"{filename}\".\n"
+            f"Supported formats: {ext_list}\n\n"
+            + NAV_FOOTER,
+            parse_mode="HTML",
         )
         return
+
+    # Show upload indicator before the download starts.
+    await upload_action(context.bot, update.effective_chat.id)
 
     try:
         tg_file = await context.bot.get_file(document.file_id)
@@ -140,14 +156,16 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "You can now use:\n"
             "📚 /quiz — generate a quiz question\n"
             "💼 /interview — mock interview question\n"
-            "🚨 /scenario — incident response scenario",
+            "🚨 /scenario — incident response scenario\n\n"
+            + NAV_FOOTER,
             parse_mode="HTML",
         )
     except ValueError as exc:
         await update.message.reply_text(f"⚠️ {exc}")
     except UnicodeDecodeError:
         await update.message.reply_text(
-            f"❌ Couldn't decode \"{filename}\" as UTF-8 text. Is it actually a .txt/.csv file?"
+            f"❌ Couldn't decode \"{filename}\" as UTF-8 text. "
+            "Is it actually a .txt/.csv file?"
         )
     except Exception as exc:
         logger.exception("Document parsing failed")
