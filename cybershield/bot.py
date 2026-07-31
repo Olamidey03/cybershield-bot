@@ -12,6 +12,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
+    PollAnswerHandler,
     filters,
     ContextTypes,
 )
@@ -23,6 +24,10 @@ from modules.pdf_assistant import (
     get_quiz_handler,
     get_interview_handler,
     scenario_command,
+    handle_poll_answer,
+    handle_quiz_settings_cb,
+    handle_quiz_study_guide_cb,
+    handle_quiz_new_round_cb,
 )
 from modules.input_parser import handle_raw_text, handle_document
 from modules.menu import MAIN_MENU_KB, get_quiz_menu_callback_handler
@@ -82,6 +87,11 @@ ABOUT_MESSAGE = (
     "(IoCs, MITRE ATT&amp;CK mapping, severity, containment actions)\n"
     "• <b>Document Assistant</b> — Upload a PDF/DOCX/TXT/CSV, then quiz yourself, practice "
     "mock interviews, or run incident response scenarios based on it\n\n"
+    "<b>Gamification:</b>\n"
+    "• Earn <b>+10 XP ⚡</b> per correct quiz answer\n"
+    "• Maintain a <b>daily streak 🔥</b> by quizzing every day\n"
+    "• Get a <b>Coach Report</b> after every round with Strengths / Growth Areas\n"
+    "• Customise pool size, focus, and difficulty — then tap ▶️ Start New Round\n\n"
     "<b>Stack:</b> Python + python-telegram-bot + Gemini (google-genai, gemini-2.5-flash)\n\n"
     "Stay safe out there. 🔐"
 )
@@ -124,11 +134,32 @@ def main():
     app.add_handler(get_quiz_menu_callback_handler())  # menu:quiz → show difficulty sub-menu
     app.add_handler(CallbackQueryHandler(handle_hint_callback, pattern=r"^quiz:hint$"))
 
+    # --- Step 7: Action Keyboard callbacks ---
+    # Settings (focus / pool / adjust) — pattern matches all three with one handler
+    app.add_handler(
+        CallbackQueryHandler(
+            handle_quiz_settings_cb,
+            pattern=r"^quiz:(focus|pool|adjust):",
+        )
+    )
+    app.add_handler(
+        CallbackQueryHandler(handle_quiz_study_guide_cb, pattern=r"^quiz:studyguide$")
+    )
+    app.add_handler(
+        CallbackQueryHandler(handle_quiz_new_round_cb, pattern=r"^quiz:newround$")
+    )
+
+    # --- Step 6: Native poll answer grading ---
+    app.add_handler(PollAnswerHandler(handle_poll_answer))
+
     # --- Simple command & menu button handlers ---
     app.add_handler(CommandHandler("scenario", scenario_command))
     app.add_handler(MessageHandler(filters.Regex("^🚨 Run Incident Scenario$"), scenario_command))
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Regex("^About$"), about))
+
+    # --- Interview handler (registered after quiz to avoid catching quiz keyboard) ---
+    app.add_handler(get_interview_handler())
 
     # --- Input Parsing Engine (catch-all — must stay last) ---
     # Handles all document uploads (.pdf, .docx, .txt, .csv) and plain-text
